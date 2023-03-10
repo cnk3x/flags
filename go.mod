@@ -1,3 +1,3 @@
-module github.com/cnk3x/flag
+module github.com/cnk3x/flags
 
 go 1.20
