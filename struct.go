@@ -30,8 +30,8 @@ func ParseStruct(set *FlagSet, value any, fOpts *Options) (err error) {
 	rv := reflect.ValueOf(value).Elem()
 	rt := rv.Type()
 
-	var cfgFile *FieldItem
-	var flagItems []*FieldItem
+	var cfgFile *fieldValue
+	var flagItems []*fieldValue
 	var nl, sl, tl, el int
 	var pl = len(fOpts.EnvPrefix)
 
@@ -43,7 +43,7 @@ func ParseStruct(set *FlagSet, value any, fOpts *Options) (err error) {
 			continue
 		}
 
-		fit := &FieldItem{Name: name, Value: rv.Field(i), Field: ft}
+		fit := &fieldValue{Name: name, Value: rv.Field(i), Field: ft}
 
 		if strings.HasSuffix(fit.Name, ",file") && ft.Type.Kind() == reflect.String {
 			fit.Name = strings.TrimSuffix(fit.Name, ",file")
@@ -194,7 +194,7 @@ func PrintFields(value any) {
 	}
 }
 
-type FieldItem struct {
+type fieldValue struct {
 	Name   string
 	Alias  []string
 	Short  string
@@ -204,47 +204,69 @@ type FieldItem struct {
 	Field  reflect.StructField
 }
 
-func (fv *FieldItem) String() string {
-	if !fv.Value.IsValid() || fv.Value.IsZero() {
-		return ""
-	}
-	switch v := fv.Value.Interface().(type) {
-	case time.Duration:
-		return v.String()
-	case time.Time:
-		return v.Format(time.RFC3339)
-	case net.IP:
-		if len(v) == 0 {
-			return ""
-		}
-		return v.String()
-	case net.IPMask:
-		if len(v) == 0 {
-			return ""
-		}
-		return v.String()
-	case *net.IPNet:
-		return v.String()
-	}
+func (fv *fieldValue) IsBoolFlag() bool { return fv.Field.Type.Kind() == reflect.Bool }
 
-	switch fv.Value.Kind() {
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		return strconv.FormatInt(fv.Value.Int(), 10)
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-		return strconv.FormatUint(fv.Value.Uint(), 10)
-	case reflect.String:
-		return fv.Value.String()
-	case reflect.Float32, reflect.Float64:
-		return strconv.FormatFloat(fv.Value.Float(), 'f', 19, 64)
-	case reflect.Bool:
-		return strconv.FormatBool(fv.Value.Bool())
-	case reflect.Struct:
-		return ""
+func (fv *fieldValue) String() string {
+	vs := reflectGet(fv.Value)
+	if len(vs) > 0 {
+		return vs[0]
 	}
 	return ""
 }
 
-func (fv *FieldItem) Set(s string) (err error) {
+func (fv *fieldValue) Set(s string) error {
+	return reflectSet(fv.Value, fv.Field.Type, s)
+}
+
+func reflectGet(fv reflect.Value) (s []string) {
+	defer recover()
+	if !fv.IsValid() {
+		return
+	}
+	switch v := fv.Interface().(type) {
+	case time.Duration:
+		s = append(s, v.String())
+		return
+	case time.Time:
+		s = append(s, v.Format(time.RFC3339))
+		return
+	case net.IP:
+		s = append(s, v.String())
+		return
+	case net.IPMask:
+		s = append(s, v.String())
+		return
+	case *net.IPNet:
+		s = append(s, v.String())
+		return
+	}
+
+	switch fv.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		s = append(s, strconv.FormatInt(fv.Int(), 10))
+		return
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		s = append(s, strconv.FormatUint(fv.Uint(), 10))
+		return
+	case reflect.String:
+		s = append(s, fv.String())
+		return
+	case reflect.Float32, reflect.Float64:
+		s = append(s, strconv.FormatFloat(fv.Float(), 'f', 19, 64))
+		return
+	case reflect.Bool:
+		s = append(s, strconv.FormatBool(fv.Bool()))
+		return
+	case reflect.Slice, reflect.Array:
+		for i := 0; i < fv.Len(); i++ {
+			s = append(s, reflectGet(fv.Index(i))...)
+		}
+		return
+	}
+	return
+}
+
+func reflectSet(fv reflect.Value, ft reflect.Type, s string) (err error) {
 	defer func() {
 		if re := recover(); re != nil {
 			if er, ok := re.(error); ok {
@@ -255,54 +277,58 @@ func (fv *FieldItem) Set(s string) (err error) {
 		}
 	}()
 
-	if s == "" && !fv.IsBoolFlag() {
+	if !fv.CanSet() {
 		return
 	}
-	switch fv.Value.Interface().(type) {
+
+	if s == "" && ft.Kind() != reflect.Bool {
+		return
+	}
+	switch fv.Interface().(type) {
 	case time.Duration:
 		var d time.Duration
 		if d, err = time.ParseDuration(s); err != nil {
 			return
 		}
-		fv.Value.SetInt(int64(d))
+		fv.SetInt(int64(d))
 	case time.Time:
 		var t time.Time
 		if t, err = time.Parse(time.RFC3339, s); err != nil {
 			return
 		}
-		fv.Value.Set(reflect.ValueOf(t))
+		fv.Set(reflect.ValueOf(t))
 	case net.IP, net.IPMask:
 		if ip := net.ParseIP(s); ip != nil {
-			fv.Value.SetBytes(ip)
+			fv.SetBytes(ip)
 		}
 	case *net.IPNet:
 		if _, _, ni := net.ParseCIDR(s); ni != nil {
-			fv.Value.Set(reflect.ValueOf(ni))
+			fv.Set(reflect.ValueOf(ni))
 		}
 	case []byte:
-		fv.Value.SetBytes([]byte(s))
+		fv.SetBytes([]byte(s))
 	default:
-		switch fv.Value.Kind() {
+		switch ft.Kind() {
 		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 			var v int64
 			if v, err = strconv.ParseInt(s, 10, 64); err != nil {
 				return
 			}
-			fv.Value.SetInt(v)
+			fv.SetInt(v)
 		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
 			var v uint64
 			if v, err = strconv.ParseUint(s, 10, 64); err != nil {
 				return
 			}
-			fv.Value.SetUint(v)
+			fv.SetUint(v)
 		case reflect.String:
-			fv.Value.SetString(s)
+			fv.SetString(s)
 		case reflect.Float32, reflect.Float64:
 			var v float64
 			if v, err = strconv.ParseFloat(s, 64); err != nil {
 				return
 			}
-			fv.Value.SetFloat(v)
+			fv.SetFloat(v)
 		case reflect.Bool:
 			var v = s == ""
 			if !v {
@@ -310,14 +336,29 @@ func (fv *FieldItem) Set(s string) (err error) {
 					return
 				}
 			}
-			fv.Value.SetBool(v)
+			fv.SetBool(v)
+		case reflect.Slice, reflect.Array:
+			ityp := ft.Elem()
+			isPtr := ityp.Kind() == reflect.Pointer
+			if isPtr {
+				ityp = ityp.Elem()
+			}
+
+			iv := reflect.New(ityp)
+			if err = reflectSet(iv.Elem(), ityp, s); err != nil {
+				return
+			}
+
+			if isPtr {
+				fv.Set(reflect.Append(fv, iv))
+			} else {
+				fv.Set(reflect.Append(fv, iv.Elem()))
+			}
 		}
 	}
 
 	return
 }
-
-func (fv *FieldItem) IsBoolFlag() bool { return fv.Field.Type.Kind() == reflect.Bool }
 
 func fieldName(ft reflect.StructField, prefix string) (name string) {
 	if !ft.IsExported() {
