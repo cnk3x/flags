@@ -1,6 +1,8 @@
 package flags
 
 import (
+	"errors"
+	"flag"
 	"fmt"
 	"net"
 	"os"
@@ -11,9 +13,15 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"golang.org/x/exp/slog"
+	"unicode"
 )
+
+var (
+	CommandLine = flag.CommandLine
+	NewFlagSet  = flag.NewFlagSet
+)
+
+type FlagSet = flag.FlagSet
 
 type Options struct {
 	Prefix      string
@@ -22,7 +30,11 @@ type Options struct {
 	Description string
 }
 
-func ParseStruct(set *FlagSet, value any, fOpts *Options) (err error) {
+func Bind(value any, fOpts *Options) (err error) {
+	executable, _ := os.Executable()
+	flag.CommandLine.Init(strings.TrimSuffix(filepath.Base(executable), ".exe"), flag.ContinueOnError)
+	flag.ErrHelp = errors.New("")
+
 	if fOpts == nil {
 		fOpts = &Options{}
 	}
@@ -72,12 +84,12 @@ func ParseStruct(set *FlagSet, value any, fOpts *Options) (err error) {
 		flagItems = append(flagItems, fit)
 
 		//apply
-		set.Var(fit, fit.Name, fit.Usage)
+		flag.Var(fit, fit.Name, fit.Usage)
 		for _, alias := range fit.Alias {
-			set.Var(fit, alias, "alias of "+fit.Name)
+			flag.Var(fit, alias, "alias of "+fit.Name)
 		}
 		if fit.Short != "" {
-			set.Var(fit, fit.Short, "short of "+fit.Name)
+			flag.Var(fit, fit.Short, "short of "+fit.Name)
 		}
 
 		if l := len(fit.Name) + 2; l > nl {
@@ -102,15 +114,15 @@ func ParseStruct(set *FlagSet, value any, fOpts *Options) (err error) {
 			}
 		}
 
-		if l := len(ft.Type.Kind().String()); l > tl {
+		if l := len(fit.Type()); l > tl {
 			tl = l
 		}
 	}
 
-	set.Usage = func() {
-		fmt.Fprint(os.Stderr, filepath.Base(set.Name()))
+	printUsage := func() {
+		fmt.Fprint(os.Stderr, flag.CommandLine.Name())
 		if fOpts.Version != "" {
-			fmt.Fprint(os.Stderr, " - version ", fOpts.Version)
+			fmt.Fprint(os.Stderr, " - ", fOpts.Version)
 		}
 		if fOpts.Description != "" {
 			fmt.Fprint(os.Stderr, " - ", fOpts.Description)
@@ -123,14 +135,13 @@ func ParseStruct(set *FlagSet, value any, fOpts *Options) (err error) {
 
 		fmt.Fprintln(os.Stderr)
 		fmt.Fprintln(os.Stderr, "命令格式:")
-		fmt.Fprintf(os.Stderr, "    %s [...参数选项]\n", filepath.Base(set.Name()))
+		fmt.Fprintf(os.Stderr, "    %s [...参数选项]\n", flag.CommandLine.Name())
 		fmt.Fprintln(os.Stderr)
 
 		fmt.Fprintln(os.Stderr, "参数选项:")
 		sort.Slice(flagItems, func(i, j int) bool { return flagItems[i].Name < flagItems[j].Name })
 		for _, it := range flagItems {
 			fmt.Fprint(os.Stderr, "    ")
-
 			if sl > 0 {
 				if it.Short != "" {
 					fmt.Fprintf(os.Stderr, "-%*s,", -sl+2, it.Short)
@@ -139,15 +150,8 @@ func ParseStruct(set *FlagSet, value any, fOpts *Options) (err error) {
 				}
 				fmt.Fprint(os.Stderr, " ")
 			}
-
 			fmt.Fprintf(os.Stderr, "--%*s  ", -nl+2, it.Name)
-
-			if it.Field.Type.Kind() != reflect.Bool {
-				fmt.Fprintf(os.Stderr, "%*s  ", -tl, it.Value.Kind().String())
-			} else {
-				fmt.Fprintf(os.Stderr, "%*s  ", tl, "")
-			}
-
+			fmt.Fprintf(os.Stderr, "%*s  ", -tl, it.Type())
 			if el > 0 {
 				if it.EnvKey != "" {
 					fmt.Fprintf(os.Stderr, "%*s", -el, "["+jEnvKey(it.EnvKey, fOpts.EnvPrefix)+"]")
@@ -156,42 +160,38 @@ func ParseStruct(set *FlagSet, value any, fOpts *Options) (err error) {
 				}
 				fmt.Fprint(os.Stderr, " ")
 			}
-
 			fmt.Fprint(os.Stderr, it.Usage)
-
 			if vs := it.String(); vs != "" {
 				if it.Usage != "" {
 					fmt.Fprint(os.Stderr, " ")
 				}
 				fmt.Fprintf(os.Stderr, `(默认: "%s")`, vs)
 			}
-
 			fmt.Fprintln(os.Stderr)
 		}
+		fmt.Fprintln(os.Stderr)
 	}
 
-	if err = set.Parse(os.Args); err != nil {
+	flag.CommandLine.Usage = func() {}
+
+	if err = flag.CommandLine.Parse(os.Args[1:]); err != nil {
+		if err != flag.ErrHelp {
+			fmt.Fprintln(os.Stderr)
+		}
+		printUsage()
 		return
 	}
 
 	if cfgFile != nil {
 		if fn := cfgFile.Value.String(); fn != "" {
 			if err = BindFile(fn, value); err != nil {
+				fmt.Fprintf(os.Stderr, "%v\n", err)
 				return
 			}
 		}
 	}
 
 	return
-}
-
-func PrintFields(value any) {
-	rv := reflect.Indirect(reflect.ValueOf(value))
-	rt := rv.Type()
-	for i := 0; i < rt.NumField(); i++ {
-		ft := rt.Field(i)
-		slog.Debug(fmt.Sprintf("%s=%v", Snakecase(ft.Name), rv.Field(i).Interface()))
-	}
 }
 
 type fieldValue struct {
@@ -218,11 +218,19 @@ func (fv *fieldValue) Set(s string) error {
 	return reflectSet(fv.Value, fv.Field.Type, s)
 }
 
+func (fv *fieldValue) Type() string {
+	if fv.IsBoolFlag() {
+		return ""
+	}
+	return baseType(strings.ToLower(fv.Field.Type.String()))
+}
+
 func reflectGet(fv reflect.Value) (s []string) {
 	defer recover()
 	if !fv.IsValid() {
 		return
 	}
+
 	switch v := fv.Interface().(type) {
 	case time.Duration:
 		s = append(s, v.String())
@@ -231,13 +239,19 @@ func reflectGet(fv reflect.Value) (s []string) {
 		s = append(s, v.Format(time.RFC3339))
 		return
 	case net.IP:
-		s = append(s, v.String())
+		if len(v) > 0 {
+			s = append(s, v.String())
+		}
 		return
 	case net.IPMask:
-		s = append(s, v.String())
+		if len(v) > 0 {
+			s = append(s, v.String())
+		}
 		return
 	case *net.IPNet:
-		s = append(s, v.String())
+		if v != nil && len(v.IP) > 0 {
+			s = append(s, v.String())
+		}
 		return
 	}
 
@@ -367,7 +381,7 @@ func fieldName(ft reflect.StructField, prefix string) (name string) {
 
 	if name != "-" {
 		if name = fieldTag(ft, "flag"); name == "" {
-			name = Snakecase(ft.Name)
+			name = snakecase(ft.Name)
 		}
 
 		if prefix != "" && name != "-" {
@@ -404,4 +418,33 @@ func fieldsSplit(s string) (arr []string) {
 	}
 	arr = arr[:x]
 	return
+}
+
+func snakecase(s string) string {
+	in := []rune(s)
+	isLower := func(idx int) bool {
+		return idx >= 0 && idx < len(in) && unicode.IsLower(in[idx])
+	}
+
+	out := make([]rune, 0, len(in)+len(in)/2)
+	for i, r := range in {
+		if unicode.IsUpper(r) {
+			r = unicode.ToLower(r)
+			if i > 0 && in[i-1] != '-' && (isLower(i-1) || isLower(i+1)) {
+				out = append(out, '-')
+			}
+		}
+		out = append(out, r)
+	}
+
+	return string(out)
+}
+
+func baseType(n string) string {
+	for i := len(n) - 1; i >= 0; i-- {
+		if n[i] == '.' {
+			return n[i+1:]
+		}
+	}
+	return n
 }

@@ -5,8 +5,6 @@ go 1.20
 require (
 	github.com/goccy/go-json v0.10.0
 	github.com/goccy/go-yaml v1.10.0
-	golang.org/x/exp v0.0.0-20230310171629-522b1b587ee0
-	golang.org/x/exp/errors v0.0.0-20230310171629-522b1b587ee0
 )
 
 require (
