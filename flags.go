@@ -72,6 +72,7 @@ func NewSet(options ...Option) *FlagSet {
 		fs.Name = filepath.Base(os.Args[0])
 	}
 
+	fs.envKeys = map[string][]string{}
 	fs.pSet = pflag.NewFlagSet(fs.Name, pflag.ExitOnError)
 	return fs
 }
