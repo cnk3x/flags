@@ -85,12 +85,18 @@ func (fs *FlagSet) ParseFrom(args []string) (err error) {
 		if fs.Version != "" {
 			fmt.Fprintf(os.Stderr, " - version %s", fs.Version)
 		}
+
 		if !fs.BuildTime.IsZero() {
 			fmt.Fprintf(os.Stderr, " - build %s", fs.BuildTime.In(time.Local).Format(time.RFC3339))
 		}
+
 		fmt.Fprintln(os.Stderr)
-		fmt.Fprintln(os.Stderr, "wrap system env as synology for xunlei")
-		fmt.Fprintln(os.Stderr)
+
+		if fs.Description != "" {
+			fmt.Fprintln(os.Stderr, fs.Description)
+			fmt.Fprintln(os.Stderr)
+		}
+
 		fmt.Fprintln(os.Stderr, "OPTIONS:")
 		fmt.Fprintln(os.Stderr, fs.FlagUsagesWrapped(0))
 	}
@@ -104,7 +110,6 @@ func (fs *FlagSet) ParseFrom(args []string) (err error) {
 
 		if keys, find := fs.envKeys[f.Name]; find && len(keys) > 0 {
 			f.Usage = fmt.Sprintf("%s[%s]", f.Usage, strings.Join(keys, ", "))
-
 			if s := getEnv(keys); s != "" {
 				if err := f.Value.Set(s); err != nil {
 					fmt.Fprintf(os.Stderr, "WARN: set flag `%s` value `%s` from environ: %s\n", f.Name, s, err)
@@ -124,13 +129,6 @@ func (fs *FlagSet) Var(v any, name, short, usage string, env ...string) {
 }
 
 func (fs *FlagSet) add(v any, name, short, usage string, env ...string) error {
-	if len(env) > 0 {
-		if usage != "" {
-			usage += " "
-		}
-		usage = fmt.Sprintf("%s[%s]", usage, strings.Join(env, ", "))
-	}
-
 	switch x := v.(type) {
 	case *time.Duration:
 		fs.DurationVarP(x, name, short, *x, usage)
@@ -191,7 +189,6 @@ func (fs *FlagSet) add(v any, name, short, usage string, env ...string) error {
 	default:
 		return fmt.Errorf("%s type %v(%T) not support", name, x, x)
 	}
-
 	if len(env) > 0 {
 		fs.envKeys[name] = env
 	}
