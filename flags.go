@@ -1,13 +1,16 @@
 package flags
 
 import (
+	"cmp"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/spf13/pflag"
 )
@@ -75,7 +78,7 @@ func (fs *FlagSet) ParseFrom(args []string) (err error) {
 		if keys, find := fs.envKeys[f.Name]; find && len(keys) > 0 {
 			f.Usage = fmt.Sprintf("%s[%s]", f.Usage, strings.Join(keys, ", "))
 
-			if s := GetEnv(keys, ""); s != "" {
+			if s := getEnv(keys); s != "" {
 				if err := f.Value.Set(s); err != nil {
 					fmt.Fprintf(os.Stderr, "WARN: set flag `%s` value `%s` from environ: %s\n", f.Name, s, err)
 				}
@@ -88,6 +91,12 @@ func (fs *FlagSet) ParseFrom(args []string) (err error) {
 func (fs *FlagSet) Parse() bool { return fs.ParseFrom(os.Args[1:]) == nil }
 
 func (fs *FlagSet) Var(v any, name, short, usage string, env ...string) {
+	if err := fs.add(v, name, short, usage, env...); err != nil {
+		panic(err)
+	}
+}
+
+func (fs *FlagSet) add(v any, name, short, usage string, env ...string) error {
 	if len(env) > 0 {
 		if usage != "" {
 			usage += " "
@@ -153,15 +162,61 @@ func (fs *FlagSet) Var(v any, name, short, usage string, env ...string) {
 	case *[]bool:
 		fs.BoolSliceVarP(x, name, short, *x, usage)
 	default:
-		panic(fmt.Errorf("%s type %v(%T) not support", name, x, x))
+		return fmt.Errorf("%s type %v(%T) not support", name, x, x)
 	}
 
 	if len(env) > 0 {
 		fs.envKeys[name] = env
 	}
+	return nil
 }
 
-func GetEnv(keys []string, def string) (s string) {
+func (fs *FlagSet) Struct(structPtr any) {
+	rv := reflect.Indirect(reflect.ValueOf(structPtr))
+	rt := rv.Type()
+
+	for i := 0; i < rt.NumField(); i++ {
+		sf := rt.Field(i)
+		if !sf.IsExported() {
+			continue
+		}
+
+		name, ok := sf.Tag.Lookup("flag")
+		if !ok || name == "-" {
+			continue
+		}
+
+		if len(name) == 0 {
+			name = lower(sf.Name)
+		}
+
+		usage := sf.Tag.Get("usage")
+		env := strings.Split(sf.Tag.Get("env"), ",")
+		short := cmp.Or(sf.Tag.Get("short"))
+
+		fs.add(rv.Field(i).Addr().Interface(), name, short, usage, env...)
+	}
+}
+
+func lower(s string) string {
+	var b strings.Builder
+	var prevUp bool
+	for i, r := range s {
+		if unicode.IsUpper(r) {
+			if i != 0 && !prevUp {
+				b.WriteRune('_')
+			}
+			prevUp = true
+			b.WriteRune(unicode.ToLower(r))
+		} else {
+			b.WriteRune(r)
+			prevUp = false
+		}
+	}
+	return b.String()
+}
+
+func getEnv(keys []string) (s string) {
 	if len(keys) > 0 {
 		for _, e := range keys {
 			if s = os.Getenv(e); s != "" {
@@ -169,5 +224,5 @@ func GetEnv(keys []string, def string) (s string) {
 			}
 		}
 	}
-	return def
+	return ""
 }
