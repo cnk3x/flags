@@ -32,9 +32,35 @@ type (
 
 type Option func(*FlagSet)
 
-func SetBuildTime(buildTime time.Time) Option { return func(fs *FlagSet) { fs.BuildTime = buildTime } }
-func SetVersion(version string) Option        { return func(fs *FlagSet) { fs.Version = version } }
-func SetDescription(desc string) Option       { return func(fs *FlagSet) { fs.Description = desc } }
+func SetVersion(version string) Option  { return func(fs *FlagSet) { fs.Version = version } }
+func SetDescription(desc string) Option { return func(fs *FlagSet) { fs.Description = desc } }
+
+func SetBuildTime[T string | time.Time | int | int64](buildTime T) Option {
+	return func(fs *FlagSet) {
+		if buildTimeString, ok := any(buildTime).(string); ok {
+			if buildTimeString != "" {
+				fs.BuildTime, _ = time.Parse(time.RFC3339, buildTimeString)
+			}
+			return
+		}
+
+		if buildTimeInt, ok := any(buildTime).(int); ok {
+			if buildTimeInt > 0 {
+				fs.BuildTime = time.Unix(int64(buildTimeInt), 0)
+			}
+			return
+		}
+
+		if buildTimeMs, ok := any(buildTime).(int64); ok {
+			if buildTimeMs > 0 {
+				fs.BuildTime = time.Unix(0, buildTimeMs*int64(time.Millisecond))
+			}
+			return
+		}
+
+		fs.BuildTime, _ = any(buildTime).(time.Time)
+	}
+}
 
 func NewSet(options ...Option) *FlagSet {
 	fs := &FlagSet{}
