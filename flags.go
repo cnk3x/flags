@@ -1,3 +1,29 @@
+// Package flags 是对 github.com/spf13/pflag 的轻量封装，目的是更方便地从结构体定义
+// 生成命令行标志（flags），并支持通过结构体 tag 指定环境变量、帮助信息、短参名等。
+//
+// 设计要点：
+// - 从结构体导出字段自动注册命令行标志；
+// - 支持常见基础类型、切片类型、网络类型（net.IP/net.IPNet）和 time.Duration；
+// - 支持在 tag 中指定 `flag`、`usage`、`env`，其中 `flag` 可同时包含长名与单字符短名；
+// - 在 Usage 中自动显示绑定的环境变量，并在启动时从环境变量读取值作为覆盖默认值；
+// - 支持在 NewSet 时通过 Option 注入版本与构建时间等元信息，Usage 会显示这些信息。
+//
+// 简要示例：
+//
+//	type Config struct {
+//	    Host string `flag:"host h" usage:"server host" env:"HOST,SERVER_HOST"`
+//	    Port int    `flag:"port p" usage:"server port" env:"PORT"`
+//	}
+//
+//	func main() {
+//	    var cfg Config
+//	    fs := NewSet(Description("示例程序"), Version("v1.0"))
+//	    fs.Struct(&cfg)
+//	    fs.Parse()
+//	    // 使用 cfg.Host, cfg.Port
+//	}
+//
+// 该包试图保留 pflag 的所有能力，同时提供更适合在结构体驱动配置场景下使用的便利函数。
 package flags
 
 import (
@@ -14,27 +40,36 @@ import (
 	"github.com/spf13/pflag"
 )
 
+// FlagSet 包装了 pflag.FlagSet，并扩展了一些功能
+// 提供了设置版本号、描述、构建时间等额外功能
 type FlagSet struct {
-	*pSet
-	Name        string
-	Description string
-	Version     string
-	BuildTime   time.Time
+	*pSet                 // 内部使用的pflag.FlagSet实例
+	Name        string    // FlagSet名称
+	Description string    // FlagSet描述
+	Version     string    // 版本号
+	BuildTime   time.Time // 构建时间
 
-	envKeys map[string][]string
+	envKeys map[string][]string // 存储环境变量键名映射
 }
 
+// pSet 和 pFlag 是 pflag 包中对应类型的别名，用于内部隐藏实现细节
 type (
-	pSet  = pflag.FlagSet // hidden FlagSet.FlagSet
+	pSet  = pflag.FlagSet // 隐藏 FlagSet.FlagSet 的具体实现
 	pFlag = pflag.Flag
 )
 
+// Option 函数类型，用于配置 FlagSet 的选项
 type Option func(*FlagSet)
 
-func SetVersion(version string) Option  { return func(fs *FlagSet) { fs.Version = version } }
-func SetDescription(desc string) Option { return func(fs *FlagSet) { fs.Description = desc } }
+// Version 返回一个 Option，用于设置 FlagSet 的版本号
+func Version(version string) Option { return func(fs *FlagSet) { fs.Version = version } }
 
-func SetBuildTime[T string | time.Time | int | int64](buildTime T) Option {
+// Description 返回一个 Option，用于设置 FlagSet 的描述信息
+func Description(desc string) Option { return func(fs *FlagSet) { fs.Description = desc } }
+
+// BuildTime 返回一个 Option，用于设置 FlagSet 的构建时间
+// 支持 string、time.Time、int、int64 类型的时间表示
+func BuildTime[T string | time.Time | int | int64](buildTime T) Option {
 	return func(fs *FlagSet) {
 		if buildTimeString, ok := any(buildTime).(string); ok {
 			if buildTimeString != "" {
@@ -61,24 +96,34 @@ func SetBuildTime[T string | time.Time | int | int64](buildTime T) Option {
 	}
 }
 
+// NewSet 创建一个新的 FlagSet 实例
+// 可以传入选项函数来配置实例属性
 func NewSet(options ...Option) *FlagSet {
 	fs := &FlagSet{}
 	for _, apply := range options {
 		apply(fs)
 	}
 
+	// 如果没有设置名称，则使用程序名作为名称
 	if fs.Name == "" {
 		fs.Name = filepath.Base(os.Args[0])
 	}
 
+	// 初始化环境变量键名映射
 	fs.envKeys = map[string][]string{}
+	// 创建底层的 pflag.FlagSet 实例
 	fs.pSet = pflag.NewFlagSet(fs.Name, pflag.ExitOnError)
 	return fs
 }
 
+// ParseFrom 解析命令行参数
+// 接收参数切片，返回错误信息
 func (fs *FlagSet) ParseFrom(args []string) (err error) {
+	// 设置帮助信息错误
 	pflag.ErrHelp = fmt.Errorf("\nstart with %s [...OPTIONS]", filepath.Base(os.Args[0]))
+	// 不对标志进行排序
 	fs.SortFlags = false
+	// 自定义使用说明输出格式
 	fs.Usage = func() {
 		fmt.Fprint(os.Stderr, filepath.Base(os.Args[0]))
 		if fs.Version != "" {
@@ -100,15 +145,26 @@ func (fs *FlagSet) ParseFrom(args []string) (err error) {
 		fmt.Fprintln(os.Stderr, fs.FlagUsagesWrapped(0))
 	}
 
-	reDeprecated := regexp.MustCompile(`\s*\*\*(.+)\*\*\s*`)
+	// 编译正则表达式，用于匹配被弃用的标记
+	// reDeprecated := regexp.MustCompile(`\s*\*\*(.+)\*\*\s*`)
+	reDeprecated := regexp.MustCompile(`\s*\*\*DEPRECATED\*\*\s*(.*)$`)
 	fs.VisitAll(func(f *pFlag) {
+		// 检查是否是被弃用的标记
 		if matches := reDeprecated.FindStringSubmatch(f.Usage); len(matches) > 1 {
-			f.Usage = reDeprecated.ReplaceAllString(f.Usage, "")
+			f.Usage = f.Usage[:len(f.Usage)-len(matches[0])]
 			f.Deprecated = matches[1]
+			if f.Deprecated == "" {
+				f.Deprecated = "deprecated"
+			}
 		}
 
+		// 如果该标志有对应的环境变量，则处理环境变量值
 		if keys, find := fs.envKeys[f.Name]; find && len(keys) > 0 {
+			if f.Usage != "" {
+				f.Usage += " "
+			}
 			f.Usage = fmt.Sprintf("%s[%s]", f.Usage, strings.Join(keys, ", "))
+
 			if s := getEnv(keys); s != "" {
 				if err := f.Value.Set(s); err != nil {
 					fmt.Fprintf(os.Stderr, "WARN: set flag `%s` value `%s` from environ: %s\n", f.Name, s, err)
@@ -116,17 +172,54 @@ func (fs *FlagSet) ParseFrom(args []string) (err error) {
 			}
 		}
 	})
+	// 解析命令行参数
 	return fs.pSet.Parse(os.Args[1:])
 }
 
+// Parse 解析命令行参数，返回布尔值表示是否成功
+// 默认从 os.Args[1:] 解析
 func (fs *FlagSet) Parse() bool { return fs.ParseFrom(os.Args[1:]) == nil }
 
+// Struct 从结构体标签中定义命令行标志
+// 结构体字段必须有 "flag" 标签才能被识别为命令行标志
+func (fs *FlagSet) Struct(structPtr any) {
+	rv := reflect.Indirect(reflect.ValueOf(structPtr)) // 获取结构体值的反射对象
+	rt := rv.Type()                                    // 获取结构体类型
+
+	// 遍历结构体的所有字段
+	for i := 0; i < rt.NumField(); i++ {
+		sf := rt.Field(i)
+
+		// 跳过非导出字段
+		if !sf.IsExported() {
+			continue
+		}
+
+		// 获取 flag 和 usage 标签
+		flag, usage := sf.Tag.Get("flag"), sf.Tag.Get("usage")
+		if flag == "-" || (flag == "" && usage == "") {
+			continue
+		}
+
+		// 解析 flag 标签，获取完整名称和短名称
+		name, short := f2ns(flag, sf.Name, lower)
+		// 解析 env 标签，获取环境变量名称列表
+		env := strings.FieldsFunc(sf.Tag.Get("env"), fSplit)
+		// 添加标志到 FlagSet
+		fs.add(rv.Field(i).Addr().Interface(), name, short, usage, env...)
+	}
+}
+
+// Var 为指定值添加命令行标志
+// v 是值的指针，name 是完整名称，short 是短名称，usage 是使用说明，env 是环境变量名称
 func (fs *FlagSet) Var(v any, name, short, usage string, env ...string) {
 	if err := fs.add(v, name, short, usage, env...); err != nil {
 		panic(err)
 	}
 }
 
+// add 根据值类型添加相应的命令行标志
+// 内部方法，根据传入的值类型调用相应的方法添加标志
 func (fs *FlagSet) add(v any, name, short, usage string, env ...string) error {
 	switch x := v.(type) {
 	case *time.Duration:
@@ -188,34 +281,15 @@ func (fs *FlagSet) add(v any, name, short, usage string, env ...string) error {
 	default:
 		return fmt.Errorf("%s type %v(%T) not support", name, x, x)
 	}
+	// 如果提供了环境变量名，则记录到映射表中
 	if len(env) > 0 {
 		fs.envKeys[name] = env
 	}
 	return nil
 }
 
-func (fs *FlagSet) Struct(structPtr any) {
-	rv := reflect.Indirect(reflect.ValueOf(structPtr))
-	rt := rv.Type()
-
-	for i := 0; i < rt.NumField(); i++ {
-		sf := rt.Field(i)
-
-		if !sf.IsExported() {
-			continue
-		}
-
-		flag, usage := sf.Tag.Get("flag"), sf.Tag.Get("usage")
-		if flag == "-" || (flag == "" && usage == "") {
-			continue
-		}
-
-		name, short := f2ns(flag, sf.Name, lower)
-		env := strings.FieldsFunc(sf.Tag.Get("env"), fSplit)
-		fs.add(rv.Field(i).Addr().Interface(), name, short, usage, env...)
-	}
-}
-
+// lower 将驼峰命名转换为下划线分隔的小写形式
+// 例如：MaxConnection -> max_connection
 func lower(s string) string {
 	var b strings.Builder
 	var prevUp bool
@@ -234,6 +308,8 @@ func lower(s string) string {
 	return b.String()
 }
 
+// getEnv 从环境变量中获取第一个非空值
+// 按顺序检查提供的环境变量键，返回第一个存在的值
 func getEnv(keys []string) (s string) {
 	if len(keys) > 0 {
 		for _, e := range keys {
@@ -245,10 +321,12 @@ func getEnv(keys []string) (s string) {
 	return ""
 }
 
-func fSplit(r rune) bool {
-	return r == ' ' || r == ',' || r == ';' || unicode.IsSpace(r)
-}
+// fSplit 定义分割字符串的规则
+// 支持空格、逗号、分号和空白字符作为分隔符
+func fSplit(r rune) bool { return r == ' ' || r == ',' || r == ';' || unicode.IsSpace(r) }
 
+// f2ns 解析 flag 标签，提取完整名称和短名称
+// flag 参数是标签内容，def 是默认名称，defParse 是默认名称解析函数
 func f2ns(flag string, def string, defParse func(string) string) (name, short string) {
 	for n := range strings.FieldsFuncSeq(flag, fSplit) {
 		if name != "" && short != "" {
