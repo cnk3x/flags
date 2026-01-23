@@ -1,7 +1,6 @@
 package flags
 
 import (
-	"cmp"
 	"fmt"
 	"net"
 	"os"
@@ -201,23 +200,18 @@ func (fs *FlagSet) Struct(structPtr any) {
 
 	for i := 0; i < rt.NumField(); i++ {
 		sf := rt.Field(i)
+
 		if !sf.IsExported() {
 			continue
 		}
 
-		name, ok := sf.Tag.Lookup("flag")
-		if !ok || name == "-" {
+		flag, usage := sf.Tag.Get("flag"), sf.Tag.Get("usage")
+		if flag == "-" || (flag == "" && usage == "") {
 			continue
 		}
 
-		if len(name) == 0 {
-			name = lower(sf.Name)
-		}
-
-		usage := sf.Tag.Get("usage")
-		env := strings.Split(sf.Tag.Get("env"), ",")
-		short := cmp.Or(sf.Tag.Get("short"))
-
+		name, short := f2ns(flag, sf.Name, lower)
+		env := strings.FieldsFunc(sf.Tag.Get("env"), fSplit)
 		fs.add(rv.Field(i).Addr().Interface(), name, short, usage, env...)
 	}
 }
@@ -249,4 +243,25 @@ func getEnv(keys []string) (s string) {
 		}
 	}
 	return ""
+}
+
+func fSplit(r rune) bool {
+	return r == ' ' || r == ',' || r == ';' || unicode.IsSpace(r)
+}
+
+func f2ns(flag string, def string, defParse func(string) string) (name, short string) {
+	for n := range strings.FieldsFuncSeq(flag, fSplit) {
+		if name != "" && short != "" {
+			break
+		}
+		if len(n) == 1 && short == "" {
+			short = n
+		} else if len(n) > 1 {
+			name = n
+		}
+	}
+	if name == "" {
+		name = defParse(def)
+	}
+	return
 }
