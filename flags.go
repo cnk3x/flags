@@ -40,38 +40,38 @@ import (
 	"github.com/spf13/pflag"
 )
 
-// FlagSet 包装了 pflag.FlagSet，并扩展了一些功能
+// App 包装了 pflag.App，并扩展了一些功能
 // 提供了设置版本号、描述、构建时间等额外功能
-type FlagSet struct {
-	*pSet                           // 内部使用的pflag.FlagSet实例
-	description string              // FlagSet描述
-	version     string              // 版本号
-	buildTime   time.Time           // 构建时间
-	envKeys     map[string][]string // 存储环境变量键名映射
+type App struct {
+	*pSet                 // 内部使用的pflag.FlagSet实例
+	description string    // FlagSet描述
+	version     string    // 版本号
+	buildTime   time.Time // 构建时间
 }
 
-// pSet 和 pFlag 是 pflag 包中对应类型的别名，用于内部隐藏实现细节
+type pSet = pflag.FlagSet
+
 type (
-	pSet  = pflag.FlagSet // 隐藏 FlagSet.FlagSet 的具体实现
-	pFlag = pflag.Flag
+	FlagItem = pflag.Flag
+	FlagSet  = pflag.FlagSet
 )
 
 // Option 函数类型，用于配置 FlagSet 的选项
-type Option func(*FlagSet)
+type Option func(*App)
 
 // Name 返回一个 Option，用于设置 FlagSet 的名称
-func Name(name string) Option { return func(fs *FlagSet) { fs.Init(name, pflag.ExitOnError) } }
+func Name(name string) Option { return func(fs *App) { fs.Init(name, pflag.ExitOnError) } }
 
 // Version 返回一个 Option，用于设置 FlagSet 的版本号
-func Version(version string) Option { return func(fs *FlagSet) { fs.version = version } }
+func Version(version string) Option { return func(fs *App) { fs.version = version } }
 
 // Description 返回一个 Option，用于设置 FlagSet 的描述信息
-func Description(desc string) Option { return func(fs *FlagSet) { fs.description = desc } }
+func Description(desc string) Option { return func(fs *App) { fs.description = desc } }
 
 // BuildTime 返回一个 Option，用于设置 FlagSet 的构建时间
 //   - 支持 string、time.Time、int、int64 类型的时间表示
 func BuildTime[T string | time.Time | int | int64](buildTime T) Option {
-	return func(fs *FlagSet) {
+	return func(fs *App) {
 		if buildTimeString, ok := any(buildTime).(string); ok {
 			if buildTimeString != "" {
 				fs.buildTime, _ = time.Parse(time.RFC3339, buildTimeString)
@@ -99,10 +99,9 @@ func BuildTime[T string | time.Time | int | int64](buildTime T) Option {
 
 // NewSet 创建一个新的 FlagSet 实例
 //   - 可以传入选项函数来配置实例属性
-func NewSet(options ...Option) *FlagSet {
-	fs := &FlagSet{
-		pSet:    pflag.NewFlagSet(filepath.Base(os.Args[0]), pflag.ExitOnError),
-		envKeys: map[string][]string{},
+func NewSet(options ...Option) *App {
+	fs := &App{
+		pSet: pflag.NewFlagSet(filepath.Base(os.Args[0]), pflag.ExitOnError),
 	}
 	for _, apply := range options {
 		apply(fs)
@@ -112,19 +111,19 @@ func NewSet(options ...Option) *FlagSet {
 
 // Version 返回 FlagSet 的版本号
 //   - 返回值: 当前 FlagSet 实例的版本号字符串
-func (fs *FlagSet) Version() string { return fs.version }
+func (fs *App) Version() string { return fs.version }
 
 // BuildTime 返回 FlagSet 的构建时间
 //   - 返回值: 当前 FlagSet 实例的构建时间
-func (fs *FlagSet) BuildTime() time.Time { return fs.buildTime }
+func (fs *App) BuildTime() time.Time { return fs.buildTime }
 
 // Description 返回 FlagSet 的描述信息
 //   - 返回值: 当前 FlagSet 实例的描述字符串
-func (fs *FlagSet) Description() string { return fs.description }
+func (fs *App) Description() string { return fs.description }
 
 // ParseFrom 解析命令行参数
 //   - 接收参数切片，返回错误信息
-func (fs *FlagSet) ParseFrom(args []string) (err error) {
+func (fs *App) ParseFrom(args []string) (err error) {
 	// 设置帮助信息错误
 	pflag.ErrHelp = fmt.Errorf("\nstart with %s [...OPTIONS]", filepath.Base(os.Args[0]))
 	// 不对标志进行排序
@@ -151,44 +150,17 @@ func (fs *FlagSet) ParseFrom(args []string) (err error) {
 		fmt.Fprintln(os.Stderr, fs.FlagUsagesWrapped(0))
 	}
 
-	// 编译正则表达式，用于匹配被弃用的标记
-	// reDeprecated := regexp.MustCompile(`\s*\*\*(.+)\*\*\s*`)
-	reDeprecated := regexp.MustCompile(`\s*\*\*DEPRECATED\*\*\s*(.*)$`)
-	fs.VisitAll(func(f *pFlag) {
-		// 检查是否是被弃用的标记
-		if matches := reDeprecated.FindStringSubmatch(f.Usage); len(matches) > 1 {
-			f.Usage = f.Usage[:len(f.Usage)-len(matches[0])]
-			f.Deprecated = matches[1]
-			if f.Deprecated == "" {
-				f.Deprecated = "deprecated"
-			}
-		}
-
-		// 如果该标志有对应的环境变量，则处理环境变量值
-		if keys, find := fs.envKeys[f.Name]; find && len(keys) > 0 {
-			if f.Usage != "" {
-				f.Usage += " "
-			}
-			f.Usage = fmt.Sprintf("%s[%s]", f.Usage, strings.Join(keys, ", "))
-
-			if s := getEnv(keys); s != "" {
-				if err := f.Value.Set(s); err != nil {
-					fmt.Fprintf(os.Stderr, "WARN: set flag `%s` value `%s` from environ: %s\n", f.Name, s, err)
-				}
-			}
-		}
-	})
 	// 解析命令行参数
 	return fs.pSet.Parse(os.Args[1:])
 }
 
 // Parse 解析命令行参数，返回布尔值表示是否成功
 //   - 默认从 os.Args[1:] 解析
-func (fs *FlagSet) Parse() bool { return fs.ParseFrom(os.Args[1:]) == nil }
+func (fs *App) Parse() bool { return fs.ParseFrom(os.Args[1:]) == nil }
 
 // Struct 从结构体标签中定义命令行标志
 //   - 结构体字段必须有 "flag" 标签才能被识别为命令行标志
-func (fs *FlagSet) Struct(structPtr any) {
+func (fs *App) Struct(structPtr any) {
 	rv := reflect.Indirect(reflect.ValueOf(structPtr)) // 获取结构体值的反射对象
 	rt := rv.Type()                                    // 获取结构体类型
 
@@ -212,21 +184,22 @@ func (fs *FlagSet) Struct(structPtr any) {
 		// 解析 env 标签，获取环境变量名称列表
 		env := strings.FieldsFunc(sf.Tag.Get("env"), fSplit)
 		// 添加标志到 FlagSet
-		fs.add(rv.Field(i).Addr().Interface(), name, short, usage, env...)
+		Var(fs.pSet, rv.Field(i).Addr().Interface(), name, short, usage, env...)
 	}
 }
 
 // Var 为指定值添加命令行标志
 //   - v 是值的指针，name 是完整名称，short 是短名称，usage 是使用说明，env 是环境变量名称
-func (fs *FlagSet) Var(v any, name, short, usage string, env ...string) {
-	if err := fs.add(v, name, short, usage, env...); err != nil {
+func (fs *App) Var(v any, name, short, usage string, env ...string) *FlagItem {
+	f, err := Var(fs.pSet, v, name, short, usage, env...)
+	if err != nil {
 		panic(err)
 	}
+	return f
 }
 
-// add 根据值类型添加相应的命令行标志
-//   - 内部方法，根据传入的值类型调用相应的方法添加标志
-func (fs *FlagSet) add(v any, name, short, usage string, env ...string) error {
+// Var 根据值类型添加相应的命令行标志
+func Var(fs *FlagSet, v any, name, short, usage string, envKeys ...string) (f *FlagItem, err error) {
 	switch x := v.(type) {
 	case *time.Duration:
 		fs.DurationVarP(x, name, short, *x, usage)
@@ -285,14 +258,39 @@ func (fs *FlagSet) add(v any, name, short, usage string, env ...string) error {
 	case *[]bool:
 		fs.BoolSliceVarP(x, name, short, *x, usage)
 	default:
-		return fmt.Errorf("%s type %v(%T) not support", name, x, x)
+		err = fmt.Errorf("%s type %v(%T) not support", name, x, x)
+		return
 	}
-	// 如果提供了环境变量名，则记录到映射表中
-	if len(env) > 0 {
-		fs.envKeys[name] = env
+
+	f = fs.Lookup(name)
+
+	// 检查是否是被弃用的标记
+	if matches := reDeprecated.FindStringSubmatch(f.Usage); len(matches) > 1 {
+		f.Usage = f.Usage[:len(f.Usage)-len(matches[0])]
+		f.Deprecated = matches[1]
+		if f.Deprecated == "" {
+			f.Deprecated = "deprecated"
+		}
 	}
-	return nil
+
+	// 如果该标志有对应的环境变量，则处理环境变量值
+	if len(envKeys) > 0 {
+		if f.Usage != "" {
+			f.Usage += " "
+		}
+		f.Usage = fmt.Sprintf("%s[%s]", f.Usage, strings.Join(envKeys, ", "))
+		if s := getEnv(envKeys); s != "" {
+			if e := f.Value.Set(s); e != nil {
+				fmt.Fprintf(os.Stderr, "WARN: set flag `%s` value `%s` from environ: %s\n", f.Name, s, e)
+			}
+		}
+	}
+
+	return
 }
+
+// 匹配弃用信息
+var reDeprecated = regexp.MustCompile(`\s*\*\*DEPRECATED\*\*\s*(.*)$`)
 
 // lower 将驼峰命名转换为下划线分隔的小写形式
 //   - 例如：MaxConnection -> max_connection
