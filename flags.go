@@ -97,9 +97,9 @@ func BuildTime[T string | time.Time | int | int64](buildTime T) Option {
 	}
 }
 
-// NewSet 创建一个新的 FlagSet 实例
+// New 创建一个新的 App 实例
 //   - 可以传入选项函数来配置实例属性
-func NewSet(options ...Option) *App {
+func New(options ...Option) *App {
 	fs := &App{
 		pSet: pflag.NewFlagSet(filepath.Base(os.Args[0]), pflag.ExitOnError),
 	}
