@@ -161,30 +161,9 @@ func (fs *App) Parse() bool { return fs.ParseFrom(os.Args[1:]) == nil }
 // Struct 从结构体标签中定义命令行标志
 //   - 结构体字段必须有 "flag" 标签才能被识别为命令行标志
 func (fs *App) Struct(structPtr any) {
-	rv := reflect.Indirect(reflect.ValueOf(structPtr)) // 获取结构体值的反射对象
-	rt := rv.Type()                                    // 获取结构体类型
-
-	// 遍历结构体的所有字段
-	for i := 0; i < rt.NumField(); i++ {
-		sf := rt.Field(i)
-
-		// 跳过非导出字段
-		if !sf.IsExported() {
-			continue
-		}
-
-		// 获取 flag 和 usage 标签
-		flag, usage := sf.Tag.Get("flag"), sf.Tag.Get("usage")
-		if flag == "-" || (flag == "" && usage == "") {
-			continue
-		}
-
-		// 解析 flag 标签，获取完整名称和短名称
-		name, short := f2ns(flag, sf.Name, lower)
-		// 解析 env 标签，获取环境变量名称列表
-		env := strings.FieldsFunc(sf.Tag.Get("env"), fSplit)
-		// 添加标志到 FlagSet
-		Var(fs.pSet, rv.Field(i).Addr().Interface(), name, short, usage, env...)
+	err := Struct(fs.pSet, structPtr)
+	if err != nil {
+		panic(err)
 	}
 }
 
@@ -287,6 +266,64 @@ func Var(fs *FlagSet, v any, name, short, usage string, envKeys ...string) (f *F
 	}
 
 	return
+}
+
+// Struct 从结构体中定义命令行标志
+func Struct(fs *FlagSet, structPtr any) (err error) {
+	rv := reflect.Indirect(reflect.ValueOf(structPtr)) // 获取结构体值的反射对象
+	rt := rv.Type()                                    // 获取结构体类型
+
+	// 遍历结构体的所有字段
+	for i := 0; i < rt.NumField(); i++ {
+		sf := rt.Field(i)
+
+		// 跳过非导出字段
+		if !sf.IsExported() {
+			continue
+		}
+
+		// 获取 flag 和 usage 标签
+		flag, usage := sf.Tag.Get("flag"), sf.Tag.Get("usage")
+		if flag == "-" || (flag == "" && usage == "") {
+			continue
+		}
+
+		// 解析 flag 标签，获取完整名称和短名称
+		name, short := f2ns(flag, sf.Name, lower)
+		// 解析 env 标签，获取环境变量名称列表
+		env := strings.FieldsFunc(sf.Tag.Get("env"), fSplit)
+		// 添加标志到 FlagSet
+		if _, err = Var(fs, rv.Field(i).Addr().Interface(), name, short, usage, env...); err != nil {
+			break
+		}
+	}
+
+	return
+}
+
+// ParseStruct 从结构体中定义命令行标志并解析命令行参数
+//   - 默认从 os.Args[1:] 解析
+//   - 从结构体中获取名称，版本信息, 构建时间, 描述信息
+func ParseStruct(structPtr any) bool {
+	var options []Option
+	if namer, ok := structPtr.(interface{ GetName() string }); ok {
+		options = append(options, Name(namer.GetName()))
+	}
+	if versioner, ok := structPtr.(interface{ GetVersion() string }); ok {
+		options = append(options, Version(versioner.GetVersion()))
+	}
+	if builder, ok := structPtr.(interface{ GetBuildTime() time.Time }); ok {
+		options = append(options, BuildTime(builder.GetBuildTime()))
+	}
+	if descriptionFetcher, ok := structPtr.(interface{ GetDescription() string }); ok {
+		options = append(options, Description(descriptionFetcher.GetDescription()))
+	}
+	fSet := New(options...)
+	if err := Struct(fSet.pSet, structPtr); err != nil {
+		fmt.Fprintf(os.Stderr, "WARN: apply struct to flag: %s", err.Error())
+		os.Exit(1)
+	}
+	return fSet.Parse()
 }
 
 // 匹配弃用信息
