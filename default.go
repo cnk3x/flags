@@ -46,7 +46,7 @@ func ParseStruct(pStruct any, options ...Option) bool {
 		option(defaultSet)
 	}
 
-	if err := AddStruct(defaultSet.pSet, pStruct); err != nil {
+	if err := StructToSet(defaultSet.pSet, pStruct); err != nil {
 		fmt.Fprintf(os.Stderr, "WARN: apply struct to flag: %s", err.Error())
 		os.Exit(1)
 	}
