@@ -32,75 +32,33 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/spf13/pflag"
 )
 
-// App 包装了 pflag.App，并扩展了一些功能
+// Set 包装了 pflag.Set，并扩展了一些功能
 // 提供了设置版本号、描述、构建时间等额外功能
-type App struct {
+type Set struct {
 	*pSet                 // 内部使用的pflag.FlagSet实例
 	description string    // FlagSet描述
 	version     string    // 版本号
 	buildTime   time.Time // 构建时间
+	errs        []error   // 错误信息
 }
-
-type pSet = pflag.FlagSet
 
 type (
 	FlagItem = pflag.Flag
 	FlagSet  = pflag.FlagSet
+
+	pSet = pflag.FlagSet
 )
-
-// Option 函数类型，用于配置 FlagSet 的选项
-type Option func(*App)
-
-// Name 返回一个 Option，用于设置 FlagSet 的名称
-func Name(name string) Option { return func(fs *App) { fs.Init(name, pflag.ExitOnError) } }
-
-// Version 返回一个 Option，用于设置 FlagSet 的版本号
-func Version(version string) Option { return func(fs *App) { fs.version = version } }
-
-// Description 返回一个 Option，用于设置 FlagSet 的描述信息
-func Description(desc string) Option { return func(fs *App) { fs.description = desc } }
-
-// BuildTime 返回一个 Option，用于设置 FlagSet 的构建时间
-//   - 支持 string、time.Time、int、int64 类型的时间表示
-func BuildTime[T string | time.Time | int | int64](buildTime T) Option {
-	return func(fs *App) {
-		if buildTimeString, ok := any(buildTime).(string); ok {
-			if buildTimeString != "" {
-				fs.buildTime, _ = time.Parse(time.RFC3339, buildTimeString)
-			}
-			return
-		}
-
-		if buildTimeInt, ok := any(buildTime).(int); ok {
-			if buildTimeInt > 0 {
-				fs.buildTime = time.Unix(int64(buildTimeInt), 0)
-			}
-			return
-		}
-
-		if buildTimeMs, ok := any(buildTime).(int64); ok {
-			if buildTimeMs > 0 {
-				fs.buildTime = time.Unix(0, buildTimeMs*int64(time.Millisecond))
-			}
-			return
-		}
-
-		fs.buildTime, _ = any(buildTime).(time.Time)
-	}
-}
 
 // New 创建一个新的 App 实例
 //   - 可以传入选项函数来配置实例属性
-func New(options ...Option) *App {
-	fs := &App{
+func New(options ...Option) *Set {
+	fs := &Set{
 		pSet: pflag.NewFlagSet(filepath.Base(os.Args[0]), pflag.ExitOnError),
 	}
 	for _, apply := range options {
@@ -111,19 +69,19 @@ func New(options ...Option) *App {
 
 // Version 返回 FlagSet 的版本号
 //   - 返回值: 当前 FlagSet 实例的版本号字符串
-func (fs *App) Version() string { return fs.version }
+func (fs *Set) Version() string { return fs.version }
 
 // BuildTime 返回 FlagSet 的构建时间
 //   - 返回值: 当前 FlagSet 实例的构建时间
-func (fs *App) BuildTime() time.Time { return fs.buildTime }
+func (fs *Set) BuildTime() time.Time { return fs.buildTime }
 
 // Description 返回 FlagSet 的描述信息
 //   - 返回值: 当前 FlagSet 实例的描述字符串
-func (fs *App) Description() string { return fs.description }
+func (fs *Set) Description() string { return fs.description }
 
-// ParseFrom 解析命令行参数
+// ParseArgs 解析命令行参数
 //   - 接收参数切片，返回错误信息
-func (fs *App) ParseFrom(args []string) (err error) {
+func (fs *Set) ParseArgs(args []string) (err error) {
 	// 设置帮助信息错误
 	pflag.ErrHelp = fmt.Errorf("\nstart with %s [...OPTIONS]", filepath.Base(os.Args[0]))
 	// 不对标志进行排序
@@ -156,92 +114,97 @@ func (fs *App) ParseFrom(args []string) (err error) {
 
 // Parse 解析命令行参数，返回布尔值表示是否成功
 //   - 默认从 os.Args[1:] 解析
-func (fs *App) Parse() bool { return fs.ParseFrom(os.Args[1:]) == nil }
+func (fs *Set) Parse() bool { return fs.ParseArgs(os.Args[1:]) == nil }
 
 // Struct 从结构体标签中定义命令行标志
 //   - 结构体字段必须有 "flag" 标签才能被识别为命令行标志
-func (fs *App) Struct(structPtr any) {
-	err := Struct(fs.pSet, structPtr)
-	if err != nil {
-		panic(err)
+func (fs *Set) Struct(structPtr any) {
+	if err := AddStruct(fs.pSet, structPtr); err != nil {
+		fs.errs = append(fs.errs, err)
 	}
 }
 
 // Var 为指定值添加命令行标志
 //   - v 是值的指针，name 是完整名称，short 是短名称，usage 是使用说明，env 是环境变量名称
-func (fs *App) Var(v any, name, short, usage string, env ...string) *FlagItem {
-	f, err := Var(fs.pSet, v, name, short, usage, env...)
+func (fs *Set) Var(v any, name string, itemOptions ...ItemOption) *FlagItem {
+	f, err := AddVar(fs.pSet, v, name, itemOptions...)
 	if err != nil {
-		panic(err)
+		fs.errs = append(fs.errs, err)
 	}
 	return f
 }
 
-// Var 根据值类型添加相应的命令行标志
-func Var(fs *FlagSet, v any, name, short, usage string, envKeys ...string) (f *FlagItem, err error) {
+// AddVar 根据值类型添加相应的命令行标志
+func AddVar(fs *FlagSet, v any, name string, itemOptions ...ItemOption) (f *FlagItem, err error) {
+	var item Item
+	item.Name = name
+	for _, apply := range itemOptions {
+		apply(&item)
+	}
+
 	switch x := v.(type) {
 	case *time.Duration:
-		fs.DurationVarP(x, name, short, *x, usage)
+		fs.DurationVarP(x, item.Name, item.Shorthand, *x, item.Usage)
 	case *net.IP:
-		fs.IPVarP(x, name, short, *x, usage)
+		fs.IPVarP(x, item.Name, item.Shorthand, *x, item.Usage)
 	case *net.IPNet:
-		fs.IPNetVarP(x, name, short, *x, usage)
+		fs.IPNetVarP(x, item.Name, item.Shorthand, *x, item.Usage)
 	case *string:
-		fs.StringVarP(x, name, short, *x, usage)
+		fs.StringVarP(x, item.Name, item.Shorthand, *x, item.Usage)
 	case *int:
-		fs.IntVarP(x, name, short, *x, usage)
+		fs.IntVarP(x, item.Name, item.Shorthand, *x, item.Usage)
 	case *int8:
-		fs.Int8VarP(x, name, short, *x, usage)
+		fs.Int8VarP(x, item.Name, item.Shorthand, *x, item.Usage)
 	case *int16:
-		fs.Int16VarP(x, name, short, *x, usage)
+		fs.Int16VarP(x, item.Name, item.Shorthand, *x, item.Usage)
 	case *int32:
-		fs.Int32VarP(x, name, short, *x, usage)
+		fs.Int32VarP(x, item.Name, item.Shorthand, *x, item.Usage)
 	case *int64:
-		fs.Int64VarP(x, name, short, *x, usage)
+		fs.Int64VarP(x, item.Name, item.Shorthand, *x, item.Usage)
 	case *uint:
-		fs.UintVarP(x, name, short, *x, usage)
+		fs.UintVarP(x, item.Name, item.Shorthand, *x, item.Usage)
 	case *uint8:
-		fs.Uint8VarP(x, name, short, *x, usage)
+		fs.Uint8VarP(x, item.Name, item.Shorthand, *x, item.Usage)
 	case *uint16:
-		fs.Uint16VarP(x, name, short, *x, usage)
+		fs.Uint16VarP(x, item.Name, item.Shorthand, *x, item.Usage)
 	case *uint32:
-		fs.Uint32VarP(x, name, short, *x, usage)
+		fs.Uint32VarP(x, item.Name, item.Shorthand, *x, item.Usage)
 	case *uint64:
-		fs.Uint64VarP(x, name, short, *x, usage)
+		fs.Uint64VarP(x, item.Name, item.Shorthand, *x, item.Usage)
 	case *float32:
-		fs.Float32VarP(x, name, short, *x, usage)
+		fs.Float32VarP(x, item.Name, item.Shorthand, *x, item.Usage)
 	case *float64:
-		fs.Float64VarP(x, name, short, *x, usage)
+		fs.Float64VarP(x, item.Name, item.Shorthand, *x, item.Usage)
 	case *bool:
-		fs.BoolVarP(x, name, short, *x, usage)
+		fs.BoolVarP(x, item.Name, item.Shorthand, *x, item.Usage)
 	case *[]time.Duration:
-		fs.DurationSliceVarP(x, name, short, *x, usage)
+		fs.DurationSliceVarP(x, item.Name, item.Shorthand, *x, item.Usage)
 	case *[]net.IP:
-		fs.IPSliceVarP(x, name, short, *x, usage)
+		fs.IPSliceVarP(x, item.Name, item.Shorthand, *x, item.Usage)
 	case *[]net.IPNet:
-		fs.IPNetSliceVarP(x, name, short, *x, usage)
+		fs.IPNetSliceVarP(x, item.Name, item.Shorthand, *x, item.Usage)
 	case *[]string:
-		fs.StringSliceVarP(x, name, short, *x, usage)
+		fs.StringSliceVarP(x, item.Name, item.Shorthand, *x, item.Usage)
 	case *[]int:
-		fs.IntSliceVarP(x, name, short, *x, usage)
+		fs.IntSliceVarP(x, item.Name, item.Shorthand, *x, item.Usage)
 	case *[]int32:
-		fs.Int32SliceVarP(x, name, short, *x, usage)
+		fs.Int32SliceVarP(x, item.Name, item.Shorthand, *x, item.Usage)
 	case *[]int64:
-		fs.Int64SliceVarP(x, name, short, *x, usage)
+		fs.Int64SliceVarP(x, item.Name, item.Shorthand, *x, item.Usage)
 	case *[]uint:
-		fs.UintSliceVarP(x, name, short, *x, usage)
+		fs.UintSliceVarP(x, item.Name, item.Shorthand, *x, item.Usage)
 	case *[]float32:
-		fs.Float32SliceVarP(x, name, short, *x, usage)
+		fs.Float32SliceVarP(x, item.Name, item.Shorthand, *x, item.Usage)
 	case *[]float64:
-		fs.Float64SliceVarP(x, name, short, *x, usage)
+		fs.Float64SliceVarP(x, item.Name, item.Shorthand, *x, item.Usage)
 	case *[]bool:
-		fs.BoolSliceVarP(x, name, short, *x, usage)
+		fs.BoolSliceVarP(x, item.Name, item.Shorthand, *x, item.Usage)
 	default:
-		err = fmt.Errorf("%s type %v(%T) not support", name, x, x)
+		err = fmt.Errorf("%s type %v(%T) not support", item.Name, x, x)
 		return
 	}
 
-	f = fs.Lookup(name)
+	f = fs.Lookup(item.Name)
 
 	// 检查是否是被弃用的标记
 	if matches := reDeprecated.FindStringSubmatch(f.Usage); len(matches) > 1 {
@@ -253,12 +216,12 @@ func Var(fs *FlagSet, v any, name, short, usage string, envKeys ...string) (f *F
 	}
 
 	// 如果该标志有对应的环境变量，则处理环境变量值
-	if len(envKeys) > 0 {
+	if len(item.Env) > 0 {
 		if f.Usage != "" {
 			f.Usage += " "
 		}
-		f.Usage = fmt.Sprintf("%s[%s]", f.Usage, strings.Join(envKeys, ", "))
-		if s := getEnv(envKeys); s != "" {
+		f.Usage = fmt.Sprintf("%s[%s]", f.Usage, strings.Join(item.Env, ", "))
+		if s := getEnv(item.Env); s != "" {
 			if e := f.Value.Set(s); e != nil {
 				fmt.Fprintf(os.Stderr, "WARN: set flag `%s` value `%s` from environ: %s\n", f.Name, s, e)
 			}
@@ -268,10 +231,10 @@ func Var(fs *FlagSet, v any, name, short, usage string, envKeys ...string) (f *F
 	return
 }
 
-// Struct 从结构体中定义命令行标志
-func Struct(fs *FlagSet, structPtr any) (err error) {
-	rv := reflect.Indirect(reflect.ValueOf(structPtr)) // 获取结构体值的反射对象
-	rt := rv.Type()                                    // 获取结构体类型
+// AddStruct 从结构体中定义命令行标志
+func AddStruct(fs *FlagSet, pStruct any) (err error) {
+	rv := reflect.Indirect(reflect.ValueOf(pStruct)) // 获取结构体值的反射对象
+	rt := rv.Type()                                  // 获取结构体类型
 
 	// 遍历结构体的所有字段
 	for i := 0; i < rt.NumField(); i++ {
@@ -293,94 +256,15 @@ func Struct(fs *FlagSet, structPtr any) (err error) {
 		// 解析 env 标签，获取环境变量名称列表
 		env := strings.FieldsFunc(sf.Tag.Get("env"), fSplit)
 		// 添加标志到 FlagSet
-		if _, err = Var(fs, rv.Field(i).Addr().Interface(), name, short, usage, env...); err != nil {
+		if _, err = AddVar(
+			fs,
+			rv.Field(i).Addr().Interface(),
+			name,
+			func(item *Item) { item.Shorthand, item.Usage, item.Env = short, usage, env },
+		); err != nil {
 			break
 		}
 	}
 
-	return
-}
-
-// ParseStruct 从结构体中定义命令行标志并解析命令行参数
-//   - 默认从 os.Args[1:] 解析
-//   - 从结构体中获取名称，版本信息, 构建时间, 描述信息
-func ParseStruct(structPtr any) bool {
-	var options []Option
-	if namer, ok := structPtr.(interface{ GetName() string }); ok {
-		options = append(options, Name(namer.GetName()))
-	}
-	if versioner, ok := structPtr.(interface{ GetVersion() string }); ok {
-		options = append(options, Version(versioner.GetVersion()))
-	}
-	if builder, ok := structPtr.(interface{ GetBuildTime() time.Time }); ok {
-		options = append(options, BuildTime(builder.GetBuildTime()))
-	}
-	if descriptionFetcher, ok := structPtr.(interface{ GetDescription() string }); ok {
-		options = append(options, Description(descriptionFetcher.GetDescription()))
-	}
-	fSet := New(options...)
-	if err := Struct(fSet.pSet, structPtr); err != nil {
-		fmt.Fprintf(os.Stderr, "WARN: apply struct to flag: %s", err.Error())
-		os.Exit(1)
-	}
-	return fSet.Parse()
-}
-
-// 匹配弃用信息
-var reDeprecated = regexp.MustCompile(`\s*\*\*DEPRECATED\*\*\s*(.*)$`)
-
-// lower 将驼峰命名转换为下划线分隔的小写形式
-//   - 例如：MaxConnection -> max_connection
-func lower(s string) string {
-	var b strings.Builder
-	var prevUp bool
-	for i, r := range s {
-		if unicode.IsUpper(r) {
-			if i != 0 && !prevUp {
-				b.WriteRune('_')
-			}
-			prevUp = true
-			b.WriteRune(unicode.ToLower(r))
-		} else {
-			b.WriteRune(r)
-			prevUp = false
-		}
-	}
-	return b.String()
-}
-
-// getEnv 从环境变量中获取第一个非空值
-//   - 按顺序检查提供的环境变量键，返回第一个存在的值
-func getEnv(keys []string) (s string) {
-	if len(keys) > 0 {
-		for _, e := range keys {
-			if s = os.Getenv(e); s != "" {
-				return
-			}
-		}
-	}
-	return ""
-}
-
-// fSplit 定义分割字符串的规则
-//   - 支持空格、逗号、分号和空白字符作为分隔符
-func fSplit(r rune) bool { return r == ' ' || r == ',' || r == ';' || unicode.IsSpace(r) }
-
-// f2ns 解析 flag 标签，提取完整名称和短名称
-//   - flag 参数是标签内容，def 是默认名称，defParse 是默认名称解析函数
-func f2ns(flag string, def string, defParse func(string) string) (name, short string) {
-	for n := range strings.FieldsFuncSeq(flag, fSplit) {
-		if name != "" && short != "" {
-			break
-		}
-		if len(n) == 1 && short == "" {
-			short = n
-		} else if len(n) > 1 {
-			name = n
-		}
-	}
-	if name == "" {
-		name = defParse(def)
-	}
 	return
 }
