@@ -56,3 +56,5 @@ func ParseStruct(pStruct any, options ...Option) bool {
 func Var(v any, name string, itemOptions ...ItemOption) *FlagItem {
 	return defaultSet.Var(v, name, itemOptions...)
 }
+
+func Parse() bool { return defaultSet.Parse() }
